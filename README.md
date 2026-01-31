@@ -12,6 +12,16 @@ license: mit
 
 # MedGemma 1.5 DICOM Report Generator
 
+## 🚀 Quick Start with Colab
+
+Run the full app for free on Google Colab — no local setup needed:
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/JAbrantesRadiology/MedGemma1.5ReportGenerator/blob/main/MedGemma_DICOM_Colab.ipynb)
+
+**Prerequisites:** HuggingFace account + [accept the MedGemma license](https://huggingface.co/google/medgemma-1.5-4b-it) + add your `HF_TOKEN` to Colab Secrets (🔑 icon). Then click **Run All** and wait ~5 min.
+
+---
+
 A Gradio-based web application that uses Google's MedGemma 1.5 model to automatically generate structured radiology reports from DICOM medical images.
 
 ![Python](https://img.shields.io/badge/python-3.10+-blue.svg)
