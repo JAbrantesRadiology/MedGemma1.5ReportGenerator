@@ -24,14 +24,24 @@ import torch
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
 
-# Detect GPU VRAM to set appropriate defaults
+# Detect GPU capabilities
 _total_vram_gb = 0
+_gpu_name = "Unknown"
 if torch.cuda.is_available():
-    _total_vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-    print(f"GPU VRAM: {_total_vram_gb:.1f} GB")
+    props = torch.cuda.get_device_properties(0)
+    _total_vram_gb = props.total_memory / (1024**3)
+    _gpu_name = props.name
+    # T4 is Turing (compute capability 7.5) - no native bfloat16
+    # A100/L4/H100 are Ampere+ (8.0+) - native bfloat16
+    _is_ampere_plus = props.major >= 8
+    print(f"GPU: {_gpu_name} | VRAM: {_total_vram_gb:.1f} GB | Compute: {props.major}.{props.minor}")
 
 # T4 (16GB) or smaller: use conservative defaults; larger GPUs: use full defaults
 IS_LOW_VRAM = _total_vram_gb < 20  # T4=15.7GB, A100=40/80GB
+
+# T4 should use float16 (native tensor core support), not bfloat16 (emulated on Turing)
+COMPUTE_DTYPE = torch.bfloat16 if (torch.cuda.is_available() and _is_ampere_plus) else torch.float16
+
 from PIL import Image
 from transformers import AutoProcessor, AutoModelForImageTextToText
 
@@ -49,13 +59,22 @@ USE_4BIT = IS_LOW_VRAM and not SPACES_AVAILABLE  # Don't use on HF Spaces (ZeroG
 
 processor = AutoProcessor.from_pretrained(MODEL_ID, token=HF_TOKEN)
 
+# On low VRAM, reduce the processor's internal image size from 896 to 448
+# This is the KEY optimization: SigLIP processes at this resolution regardless of input size
+# 448x448 = 1024 patches vs 896x896 = 4096 patches = 4x less vision encoder memory
+if IS_LOW_VRAM:
+    if hasattr(processor, 'image_processor'):
+        original_size = getattr(processor.image_processor, 'size', {})
+        processor.image_processor.size = {"height": 448, "width": 448}
+        print(f"🔧 Reduced processor image size: {original_size} → 448x448 (saves ~75% vision encoder memory)")
+
 if USE_4BIT:
     try:
         from transformers import BitsAndBytesConfig
-        print("🔧 Low VRAM detected — loading model in 4-bit quantization...")
+        print(f"🔧 Loading model in 4-bit NF4 (compute: {COMPUTE_DTYPE})...")
         quantization_config = BitsAndBytesConfig(
             load_in_4bit=True,
-            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_compute_dtype=COMPUTE_DTYPE,
             bnb_4bit_quant_type="nf4",
         )
         model = AutoModelForImageTextToText.from_pretrained(
@@ -64,29 +83,32 @@ if USE_4BIT:
             quantization_config=quantization_config,
             token=HF_TOKEN,
         )
-    except ImportError:
-        print("⚠️  bitsandbytes not available, falling back to bfloat16...")
+        print("✅ 4-bit quantization loaded successfully")
+    except Exception as e:
+        print(f"⚠️  4-bit quantization failed: {e}")
+        print("   Falling back to float16...")
         USE_4BIT = False
 
 if not USE_4BIT:
     model = AutoModelForImageTextToText.from_pretrained(
         MODEL_ID,
         device_map="auto",
-        torch_dtype=torch.bfloat16,
+        torch_dtype=COMPUTE_DTYPE,
         token=HF_TOKEN,
     )
 
 model.generation_config.do_sample = True
 print(f"Model loaded: {MODEL_ID}")
-print(f"Model device: {model.device}")
 print(f"Model dtype: {next(model.parameters()).dtype}")
 if USE_4BIT:
-    print(f"Quantization: 4-bit NF4 (saves ~5 GB VRAM)")
+    print(f"Quantization: 4-bit NF4")
 if torch.cuda.is_available():
     allocated = torch.cuda.memory_allocated() / (1024**3)
     total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
     free = total - allocated
-    print(f"VRAM after model load: {allocated:.1f} GB used / {free:.1f} GB free / {total:.1f} GB total")
+    print(f"VRAM: {allocated:.1f} GB used / {free:.1f} GB free / {total:.1f} GB total")
+    if free < 4:
+        print(f"⚠️  WARNING: Only {free:.1f} GB free - may OOM during inference!")
 
 # Store processed data for reuse
 cached_data = {
@@ -280,7 +302,7 @@ def _generate_report_impl(
             tokenize=True,
             return_dict=True,
             return_tensors="pt"
-        ).to(device=model.device, dtype=torch.bfloat16)
+        ).to(device=model.device, dtype=COMPUTE_DTYPE)
 
         input_len = inputs["input_ids"].shape[-1]
         print(f"Input sequence length: {input_len}")
