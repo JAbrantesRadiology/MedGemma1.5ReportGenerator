@@ -13,6 +13,9 @@ import tempfile
 import traceback
 from typing import Tuple, List
 
+# Enable expandable segments to reduce CUDA memory fragmentation
+os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
+
 import gradio as gr
 import torch
 
@@ -20,6 +23,15 @@ import torch
 # This forces cuBLAS to use more compatible computation paths
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
+
+# Detect GPU VRAM to set appropriate defaults
+_total_vram_gb = 0
+if torch.cuda.is_available():
+    _total_vram_gb = torch.cuda.get_device_properties(0).total_mem / (1024**3)
+    print(f"GPU VRAM: {_total_vram_gb:.1f} GB")
+
+# T4 (16GB) or smaller: use conservative defaults; larger GPUs: use full defaults
+IS_LOW_VRAM = _total_vram_gb < 20  # T4=15.7GB, A100=40/80GB
 from PIL import Image
 from transformers import AutoProcessor, AutoModelForImageTextToText
 
@@ -161,6 +173,12 @@ def _generate_report_impl(
     try:
         if file_path is None:
             return "Please upload a DICOM ZIP file first."
+
+        # Free up GPU memory before generation
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            import gc
+            gc.collect()
 
         # Check if we can use cached images
         use_cache = (
@@ -336,19 +354,19 @@ def create_interface():
                     max_slices_slider = gr.Slider(
                         minimum=0,
                         maximum=50,
-                        value=10,
+                        value=5 if IS_LOW_VRAM else 10,
                         step=1,
                         label="Max Slices Per Series",
-                        info="0 = use all slices. Reduce to save VRAM."
+                        info="0 = use all slices. Reduce to save VRAM. (T4: keep ≤5)"
                     )
 
                     image_size_slider = gr.Slider(
                         minimum=224,
                         maximum=1024,
-                        value=512,
+                        value=384 if IS_LOW_VRAM else 512,
                         step=32,
                         label="Image Size",
-                        info="Smaller = less VRAM, lower quality"
+                        info="Smaller = less VRAM, lower quality. (T4: keep ≤384)"
                     )
 
                     gr.Markdown("**Windowing (for CT/X-ray)**")
