@@ -70,14 +70,9 @@ if USE_4BIT:
 
 processor = AutoProcessor.from_pretrained(MODEL_ID, token=HF_TOKEN)
 
-# On low VRAM, reduce the processor's internal image size from 896 to 448
-# This is the KEY optimization: SigLIP processes at this resolution regardless of input size
-# 448x448 = 1024 patches vs 896x896 = 4096 patches = 4x less vision encoder memory
-if IS_LOW_VRAM:
-    if hasattr(processor, 'image_processor'):
-        original_size = getattr(processor.image_processor, 'size', {})
-        processor.image_processor.size = {"height": 448, "width": 448}
-        print(f"🔧 Reduced processor image size: {original_size} → 448x448 (saves ~75% vision encoder memory)")
+# NOTE: SigLIP has fixed positional embeddings at 896x896 (4096 patches).
+# Cannot resize processor image size without breaking the model.
+# Memory savings come from 4-bit quantization instead.
 
 if USE_4BIT:
     try:
