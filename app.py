@@ -57,6 +57,17 @@ HF_TOKEN = os.getenv("HF_TOKEN")
 # Use 4-bit quantization on low VRAM GPUs (T4 etc.) to free memory for images
 USE_4BIT = IS_LOW_VRAM and not SPACES_AVAILABLE  # Don't use on HF Spaces (ZeroGPU handles it)
 
+# Auto-install bitsandbytes if needed and not available
+if USE_4BIT:
+    try:
+        import bitsandbytes
+        print(f"✅ bitsandbytes {bitsandbytes.__version__} available")
+    except ImportError:
+        print("📦 Installing bitsandbytes for 4-bit quantization...")
+        import subprocess, sys
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "bitsandbytes>=0.43.0"])
+        print("✅ bitsandbytes installed")
+
 processor = AutoProcessor.from_pretrained(MODEL_ID, token=HF_TOKEN)
 
 # On low VRAM, reduce the processor's internal image size from 896 to 448
