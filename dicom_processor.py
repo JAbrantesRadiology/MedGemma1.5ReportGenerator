@@ -244,6 +244,7 @@ def process_dicom_study(
     zip_bytes: bytes,
     max_slices: int = 500,
     max_slices_per_series: Optional[int] = None,
+    max_total_images: Optional[int] = None,
     image_size: int = 896,
     window_center: Optional[float] = None,
     window_width: Optional[float] = None
@@ -255,6 +256,7 @@ def process_dicom_study(
         zip_bytes: ZIP file contents
         max_slices: Maximum total slices across all series (used if max_slices_per_series is None)
         max_slices_per_series: If set, sample this many slices evenly from each series
+        max_total_images: Hard cap on total images sent to model (applied AFTER per-series sampling)
         image_size: Output image size (square, e.g., 896 for 896x896)
         window_center: Window center for display (None = use DICOM default or auto)
         window_width: Window width for display (None = use DICOM default or auto)
@@ -290,6 +292,11 @@ def process_dicom_study(
             sorted_slices = sort_slices_by_position(series_files)
             all_sorted_slices.extend(sorted_slices)
         sampled_slices = sample_slices_evenly(all_sorted_slices, max_slices)
+
+    # Apply hard total cap (important for multi-series studies on low VRAM)
+    if max_total_images is not None and len(sampled_slices) > max_total_images:
+        print(f"⚠️  Capping total images from {len(sampled_slices)} to {max_total_images}")
+        sampled_slices = sample_slices_evenly(sampled_slices, max_total_images)
 
     sampled_count = len(sampled_slices)
 

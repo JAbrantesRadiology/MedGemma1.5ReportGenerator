@@ -68,6 +68,7 @@ cached_data = {
 def process_dicom_file(
     file_path: str,
     max_slices_per_series: int,
+    max_total_images: int,
     image_size: int,
     window_center: float,
     window_width: float,
@@ -90,9 +91,13 @@ def process_dicom_file(
         wc = None if use_auto_window else window_center
         ww = None if use_auto_window else window_width
 
+        # Total image cap (0 = no cap)
+        total_cap = max_total_images if max_total_images > 0 else None
+
         modality, images, study_info = process_dicom_study(
             zip_bytes,
             max_slices_per_series=slices_per_series,
+            max_total_images=total_cap,
             image_size=image_size,
             window_center=wc,
             window_width=ww
@@ -113,11 +118,14 @@ def process_dicom_file(
         window_info = f"Window: Auto (WC={default_wc}, WW={default_ww})" if use_auto_window else f"Window: Manual (WC={window_center}, WW={window_width})"
 
         # Estimate VRAM usage based on actual image size
+        # Each image gets tokenized into ~256 tokens by SigLIP vision encoder
+        # Vision encoder attention scales with total tokens, plus KV cache for LLM
         num_images = study_info.get('ProcessedImages', 0)
         img_size = study_info.get('ImageSize', 896)
         model_vram_gb = 8.0
-        base_per_image_mb = 50
-        size_factor = (img_size / 896) ** 2
+        # ~200MB per image at 512px through vision encoder + token embeddings
+        base_per_image_mb = 200
+        size_factor = (img_size / 512) ** 2
         per_image_vram_mb = base_per_image_mb * size_factor
         images_vram_gb = (num_images * per_image_vram_mb) / 1024
         total_vram_gb = model_vram_gb + images_vram_gb
@@ -139,6 +147,7 @@ Image Size: {img_size}x{img_size}
 --- VRAM Estimate ---
 Model: ~{model_vram_gb:.1f} GB
 Images ({num_images} x {img_size}x{img_size}): ~{images_vram_gb:.1f} GB
+⚠️  T4 (15 GB) max usable: ~6-7 GB for images
 Total Estimated: ~{total_vram_gb:.1f} GB
 """
 
@@ -156,6 +165,7 @@ Total Estimated: ~{total_vram_gb:.1f} GB
 def _generate_report_impl(
     file_path: str,
     max_slices_per_series: int,
+    max_total_images: int,
     image_size: int,
     window_center: float,
     window_width: float,
@@ -194,12 +204,14 @@ def _generate_report_impl(
                 zip_bytes = f.read()
 
             slices_per_series = max_slices_per_series if max_slices_per_series > 0 else None
+            total_cap = max_total_images if max_total_images > 0 else None
             wc = None if use_auto_window else window_center
             ww = None if use_auto_window else window_width
 
             modality, images, study_info = process_dicom_study(
                 zip_bytes,
                 max_slices_per_series=slices_per_series,
+                max_total_images=total_cap,
                 image_size=image_size,
                 window_center=wc,
                 window_width=ww
@@ -294,6 +306,7 @@ if SPACES_AVAILABLE:
     def generate_report(
         file_path: str,
         max_slices_per_series: int,
+        max_total_images: int,
         image_size: int,
         window_center: float,
         window_width: float,
@@ -307,7 +320,7 @@ if SPACES_AVAILABLE:
     ) -> str:
         """Generate radiology report using MedGemma (GPU-accelerated on HF Spaces)."""
         return _generate_report_impl(
-            file_path, max_slices_per_series, image_size,
+            file_path, max_slices_per_series, max_total_images, image_size,
             window_center, window_width, use_auto_window,
             prompt, max_tokens, temperature, top_p, top_k, do_sample
         )
@@ -315,6 +328,7 @@ else:
     def generate_report(
         file_path: str,
         max_slices_per_series: int,
+        max_total_images: int,
         image_size: int,
         window_center: float,
         window_width: float,
@@ -328,7 +342,7 @@ else:
     ) -> str:
         """Generate radiology report using MedGemma."""
         return _generate_report_impl(
-            file_path, max_slices_per_series, image_size,
+            file_path, max_slices_per_series, max_total_images, image_size,
             window_center, window_width, use_auto_window,
             prompt, max_tokens, temperature, top_p, top_k, do_sample
         )
@@ -358,6 +372,15 @@ def create_interface():
                         step=1,
                         label="Max Slices Per Series",
                         info="0 = use all slices. Reduce to save VRAM. (T4: keep ≤5)"
+                    )
+
+                    max_total_slider = gr.Slider(
+                        minimum=0,
+                        maximum=100,
+                        value=15 if IS_LOW_VRAM else 50,
+                        step=1,
+                        label="Max Total Images",
+                        info="Hard cap across ALL series. 0 = no cap. (T4: keep ≤15)"
                     )
 
                     image_size_slider = gr.Slider(
@@ -504,6 +527,7 @@ def create_interface():
             inputs=[
                 file_input,
                 max_slices_slider,
+                max_total_slider,
                 image_size_slider,
                 window_center_slider,
                 window_width_slider,
@@ -517,6 +541,7 @@ def create_interface():
             inputs=[
                 file_input,
                 max_slices_slider,
+                max_total_slider,
                 image_size_slider,
                 window_center_slider,
                 window_width_slider,
