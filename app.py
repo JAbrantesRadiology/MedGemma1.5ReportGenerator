@@ -44,17 +44,49 @@ print("Loading MedGemma model at startup...")
 MODEL_ID = os.getenv("MODEL_ID", "google/medgemma-1.5-4b-it")
 HF_TOKEN = os.getenv("HF_TOKEN")
 
+# Use 4-bit quantization on low VRAM GPUs (T4 etc.) to free memory for images
+USE_4BIT = IS_LOW_VRAM and not SPACES_AVAILABLE  # Don't use on HF Spaces (ZeroGPU handles it)
+
 processor = AutoProcessor.from_pretrained(MODEL_ID, token=HF_TOKEN)
-model = AutoModelForImageTextToText.from_pretrained(
-    MODEL_ID,
-    device_map="auto",
-    torch_dtype=torch.bfloat16,
-    token=HF_TOKEN,
-)
+
+if USE_4BIT:
+    try:
+        from transformers import BitsAndBytesConfig
+        print("🔧 Low VRAM detected — loading model in 4-bit quantization...")
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_quant_type="nf4",
+        )
+        model = AutoModelForImageTextToText.from_pretrained(
+            MODEL_ID,
+            device_map="auto",
+            quantization_config=quantization_config,
+            token=HF_TOKEN,
+        )
+    except ImportError:
+        print("⚠️  bitsandbytes not available, falling back to bfloat16...")
+        USE_4BIT = False
+
+if not USE_4BIT:
+    model = AutoModelForImageTextToText.from_pretrained(
+        MODEL_ID,
+        device_map="auto",
+        torch_dtype=torch.bfloat16,
+        token=HF_TOKEN,
+    )
+
 model.generation_config.do_sample = True
 print(f"Model loaded: {MODEL_ID}")
 print(f"Model device: {model.device}")
 print(f"Model dtype: {next(model.parameters()).dtype}")
+if USE_4BIT:
+    print(f"Quantization: 4-bit NF4 (saves ~5 GB VRAM)")
+if torch.cuda.is_available():
+    allocated = torch.cuda.memory_allocated() / (1024**3)
+    total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+    free = total - allocated
+    print(f"VRAM after model load: {allocated:.1f} GB used / {free:.1f} GB free / {total:.1f} GB total")
 
 # Store processed data for reuse
 cached_data = {
