@@ -2,6 +2,7 @@
 DICOM utilities for processing medical imaging studies.
 """
 import io
+import os
 import zipfile
 from typing import List, Tuple, Dict, Optional
 import numpy as np
@@ -19,24 +20,43 @@ def has_pixel_data(ds: pydicom.Dataset) -> bool:
 
 
 def extract_dicom_from_zip(zip_bytes: bytes) -> List[Tuple[str, pydicom.Dataset]]:
-    """Extract DICOM files from a ZIP archive, filtering out non-image files."""
+    """Extract DICOM files from a ZIP archive, filtering out non-image files.
+    
+    Bug Fix #1: Don't filter by .dcm extension only. Many PACS exports use
+    filenames like 'IM000001' or SOP UIDs with no extension. Instead, try to
+    parse every file as DICOM, skipping known non-DICOM extensions and directories.
+    """
+    # Known non-DICOM extensions to skip without attempting parse
+    SKIP_EXTENSIONS = {'.txt', '.xml', '.pdf', '.jpg', '.jpeg', '.png', '.gif',
+                       '.html', '.htm', '.css', '.js', '.json', '.csv', '.log'}
     dicom_files = []
     
     with zipfile.ZipFile(io.BytesIO(zip_bytes), 'r') as zip_ref:
         for filename in zip_ref.namelist():
-            if filename.lower().endswith('.dcm'):
-                try:
-                    file_bytes = zip_ref.read(filename)
-                    ds = pydicom.dcmread(io.BytesIO(file_bytes))
+            # Skip directories
+            if filename.endswith('/'):
+                continue
+            # Skip macOS resource fork junk
+            if '__MACOSX/' in filename:
+                continue
+            # Skip known non-DICOM extensions
+            _, ext = os.path.splitext(filename.lower())
+            if ext in SKIP_EXTENSIONS:
+                continue
+            
+            try:
+                file_bytes = zip_ref.read(filename)
+                ds = pydicom.dcmread(io.BytesIO(file_bytes))
+                
+                # Skip files without pixel data (SR, reports, dose records, etc.)
+                if has_pixel_data(ds):
+                    dicom_files.append((filename, ds))
+                else:
+                    print(f"Skipping {filename}: No pixel data (likely SR or report)")
                     
-                    # Skip files without pixel data (SR, reports, dose records, etc.)
-                    if has_pixel_data(ds):
-                        dicom_files.append((filename, ds))
-                    else:
-                        print(f"Skipping {filename}: No pixel data (likely SR or report)")
-                        
-                except Exception as e:
-                    print(f"Error reading {filename}: {e}")
+            except Exception as e:
+                # Not a valid DICOM file - silently skip
+                print(f"Skipping {filename}: not a valid DICOM file ({e})")
     
     return dicom_files
 
@@ -76,7 +96,26 @@ def apply_windowing(
     window_center: Optional[float] = None,
     window_width: Optional[float] = None
 ) -> np.ndarray:
-    """Apply rescale slope/intercept and windowing to pixel array."""
+    """Apply rescale slope/intercept and windowing to pixel array.
+    
+    Bug Fix #4: RGB/color images skip windowing - just scale to uint8.
+    Bug Fix #2: MONOCHROME1 images are inverted after normalization.
+    """
+    photometric = getattr(ds, 'PhotometricInterpretation', 'MONOCHROME2')
+    
+    # Bug Fix #4: Color images (RGB, YBR_FULL, YBR_FULL_422) should not
+    # have windowing/rescale applied - just ensure uint8 output
+    color_interpretations = {'RGB', 'YBR_FULL', 'YBR_FULL_422', 'YBR_RCT', 'YBR_ICT',
+                             'PALETTE COLOR'}
+    if photometric in color_interpretations:
+        if pixel_array.dtype != np.uint8:
+            pmin, pmax = pixel_array.min(), pixel_array.max()
+            if pmax > pmin:
+                pixel_array = ((pixel_array - pmin) / (pmax - pmin) * 255).astype(np.uint8)
+            else:
+                pixel_array = np.zeros_like(pixel_array, dtype=np.uint8)
+        return pixel_array
+    
     # Apply rescale slope and intercept (converts to HU for CT)
     slope = getattr(ds, 'RescaleSlope', 1)
     intercept = getattr(ds, 'RescaleIntercept', 0)
@@ -105,6 +144,11 @@ def apply_windowing(
         else:
             normalized = np.zeros_like(pixel_array, dtype=np.uint8)
 
+    # Bug Fix #2: MONOCHROME1 means high pixel values = dark (inverted)
+    # After normalization, invert so display is correct
+    if photometric == 'MONOCHROME1':
+        normalized = 255 - normalized
+
     return normalized
 
 
@@ -114,7 +158,12 @@ def dicom_to_pil(
     window_center: Optional[float] = None,
     window_width: Optional[float] = None
 ) -> Image.Image:
-    """Convert DICOM dataset to PIL Image with optional windowing and resizing."""
+    """Convert DICOM dataset to PIL Image with optional windowing and resizing.
+    
+    Bug Fix #3: Preserve aspect ratio instead of forcing square resize.
+    Resize so the longest dimension fits `size`, then pad with black to
+    make the output square (for model compatibility).
+    """
     pixel_array = ds.pixel_array
     normalized = apply_windowing(pixel_array, ds, window_center, window_width)
 
@@ -135,7 +184,24 @@ def dicom_to_pil(
     if pil_image.mode != 'RGB':
         pil_image = pil_image.convert('RGB')
 
-    pil_image = pil_image.resize(size, Image.LANCZOS)
+    # Bug Fix #3: Preserve aspect ratio, then pad to square
+    target_w, target_h = size
+    orig_w, orig_h = pil_image.size
+    
+    # Calculate scale to fit longest dimension
+    scale = min(target_w / orig_w, target_h / orig_h)
+    new_w = int(orig_w * scale)
+    new_h = int(orig_h * scale)
+    
+    pil_image = pil_image.resize((new_w, new_h), Image.LANCZOS)
+    
+    # Pad with black to make square
+    if new_w != target_w or new_h != target_h:
+        padded = Image.new('RGB', (target_w, target_h), (0, 0, 0))
+        paste_x = (target_w - new_w) // 2
+        paste_y = (target_h - new_h) // 2
+        padded.paste(pil_image, (paste_x, paste_y))
+        pil_image = padded
 
     return pil_image
 

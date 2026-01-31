@@ -2,6 +2,7 @@
 DICOM utilities for processing medical imaging studies.
 """
 import io
+import os
 import zipfile
 from typing import List, Tuple, Dict, Optional
 import numpy as np
@@ -13,23 +14,39 @@ def extract_dicom_from_zip(zip_bytes: bytes) -> List[Tuple[str, pydicom.Dataset]
     """
     Extract DICOM files from a ZIP archive.
     
+    Bug Fix #1: Don't filter by .dcm extension only. Many PACS exports use
+    filenames like 'IM000001' or SOP UIDs with no extension. Try to parse
+    every file as DICOM, skipping known non-DICOM extensions and directories.
+    
     Args:
         zip_bytes: Raw bytes of the ZIP file
         
     Returns:
         List of tuples (filename, pydicom Dataset)
     """
+    SKIP_EXTENSIONS = {'.txt', '.xml', '.pdf', '.jpg', '.jpeg', '.png', '.gif',
+                       '.html', '.htm', '.css', '.js', '.json', '.csv', '.log'}
     dicom_files = []
     
     with zipfile.ZipFile(io.BytesIO(zip_bytes), 'r') as zip_ref:
         for filename in zip_ref.namelist():
-            if filename.lower().endswith('.dcm'):
-                try:
-                    file_bytes = zip_ref.read(filename)
-                    ds = pydicom.dcmread(io.BytesIO(file_bytes))
-                    dicom_files.append((filename, ds))
-                except Exception as e:
-                    print(f"Error reading {filename}: {e}")
+            # Skip directories
+            if filename.endswith('/'):
+                continue
+            # Skip macOS resource fork junk
+            if '__MACOSX/' in filename:
+                continue
+            # Skip known non-DICOM extensions
+            _, ext = os.path.splitext(filename.lower())
+            if ext in SKIP_EXTENSIONS:
+                continue
+            
+            try:
+                file_bytes = zip_ref.read(filename)
+                ds = pydicom.dcmread(io.BytesIO(file_bytes))
+                dicom_files.append((filename, ds))
+            except Exception as e:
+                print(f"Skipping {filename}: not a valid DICOM file ({e})")
     
     return dicom_files
 
@@ -55,7 +72,10 @@ def get_study_info(ds: pydicom.Dataset) -> Dict:
 
 def normalize_pixel_array(ds: pydicom.Dataset) -> np.ndarray:
     """
-    Normalize DICOM pixel array to 8-bit grayscale.
+    Normalize DICOM pixel array to 8-bit.
+    
+    Bug Fix #4: RGB/color images skip rescale - just ensure uint8.
+    Bug Fix #2: MONOCHROME1 images are inverted after normalization.
     
     Args:
         ds: pydicom Dataset
@@ -64,6 +84,19 @@ def normalize_pixel_array(ds: pydicom.Dataset) -> np.ndarray:
         Normalized numpy array (0-255)
     """
     pixel_array = ds.pixel_array
+    photometric = getattr(ds, 'PhotometricInterpretation', 'MONOCHROME2')
+    
+    # Bug Fix #4: Color images should not have rescale/windowing applied
+    color_interpretations = {'RGB', 'YBR_FULL', 'YBR_FULL_422', 'YBR_RCT', 'YBR_ICT',
+                             'PALETTE COLOR'}
+    if photometric in color_interpretations:
+        if pixel_array.dtype != np.uint8:
+            pmin, pmax = pixel_array.min(), pixel_array.max()
+            if pmax > pmin:
+                pixel_array = ((pixel_array - pmin) / (pmax - pmin) * 255).astype(np.uint8)
+            else:
+                pixel_array = np.zeros_like(pixel_array, dtype=np.uint8)
+        return pixel_array
     
     # Apply rescale slope and intercept if present
     slope = getattr(ds, 'RescaleSlope', 1)
@@ -78,6 +111,11 @@ def normalize_pixel_array(ds: pydicom.Dataset) -> np.ndarray:
         normalized = ((pixel_array - pixel_min) / (pixel_max - pixel_min) * 255).astype(np.uint8)
     else:
         normalized = np.zeros_like(pixel_array, dtype=np.uint8)
+    
+    # Bug Fix #2: MONOCHROME1 means high pixel values = dark
+    # Invert so display is correct
+    if photometric == 'MONOCHROME1':
+        normalized = 255 - normalized
     
     return normalized
 
