@@ -14,7 +14,7 @@ import traceback
 from typing import Tuple, List
 
 # Enable expandable segments to reduce CUDA memory fragmentation
-os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
+os.environ.setdefault('PYTORCH_ALLOC_CONF', 'expandable_segments:True')
 
 import gradio as gr
 import torch
@@ -27,7 +27,7 @@ torch.backends.cudnn.allow_tf32 = False
 # Detect GPU VRAM to set appropriate defaults
 _total_vram_gb = 0
 if torch.cuda.is_available():
-    _total_vram_gb = torch.cuda.get_device_properties(0).total_mem / (1024**3)
+    _total_vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
     print(f"GPU VRAM: {_total_vram_gb:.1f} GB")
 
 # T4 (16GB) or smaller: use conservative defaults; larger GPUs: use full defaults
