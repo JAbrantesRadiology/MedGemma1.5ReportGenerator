@@ -39,8 +39,9 @@ if torch.cuda.is_available():
 # T4 (16GB) or smaller: use conservative defaults; larger GPUs: use full defaults
 IS_LOW_VRAM = _total_vram_gb < 20  # T4=15.7GB, A100=40/80GB
 
-# T4 should use float16 (native tensor core support), not bfloat16 (emulated on Turing)
-COMPUTE_DTYPE = torch.bfloat16 if (torch.cuda.is_available() and _is_ampere_plus) else torch.float16
+# Must use bfloat16 compute dtype - float16 causes NaN in sampling (known issue).
+# T4 emulates bfloat16 (no native tensor cores) but it works correctly.
+COMPUTE_DTYPE = torch.bfloat16
 
 from PIL import Image
 from transformers import AutoProcessor, AutoModelForImageTextToText
